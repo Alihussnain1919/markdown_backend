@@ -4,4 +4,4 @@ python-multipart==0.0.9
 requests
 yt-dlp
 youtube-transcript-api
-markitdown[all]==0.1.6
+markitdown[all]
