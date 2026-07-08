@@ -2,12 +2,16 @@ import os
 import re
 import shutil
 import tempfile
+import os
+from dotenv import load_dotenv  
 
+load_dotenv()  
 import requests
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 from pydantic import BaseModel
+
 
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
@@ -23,7 +27,9 @@ app.add_middleware(
 
 md = MarkItDown()
 
-ALLOWED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".txt", ".csv", ".json"}
+DOC_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".txt", ".csv", ".json"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".gif"}
+ALLOWED_EXT = DOC_EXT | IMAGE_EXT
 
 
 class UrlRequest(BaseModel):
@@ -33,6 +39,53 @@ class UrlRequest(BaseModel):
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+OCR_SPACE_API_KEY = os.environ.get("OCR_SPACE_API_KEY")
+OCR_SPACE_URL = "https://api.ocr.space/parse/image"
+
+
+def _ocr_image(path: str) -> str:
+    """
+    Extract text from an image using the OCR.space free API.
+
+    Why an API instead of Tesseract: Render's native (non-Docker) environment
+    doesn't allow apt-get/sudo, so the tesseract system binary can't be
+    installed there. OCR.space needs no local binary -- just an HTTP call --
+    so it works on Render's plain Python runtime with no extra config.
+
+    Free tier: ~25,000 requests/month, no credit card, but caps uploaded
+    files at 1MB. Get a free key at https://ocr.space/ocrapi and set it as
+    the OCR_SPACE_API_KEY environment variable on Render.
+    """
+    if not OCR_SPACE_API_KEY:
+        raise RuntimeError(
+            "OCR_SPACE_API_KEY is not set. Get a free key at "
+            "https://ocr.space/ocrapi and add it in Render's Environment tab."
+        )
+
+    with open(path, "rb") as f:
+        response = requests.post(
+            OCR_SPACE_URL,
+            files={"file": f},
+            data={"apikey": OCR_SPACE_API_KEY, "language": "eng", "OCREngine": 2},
+            timeout=30,
+        )
+
+    data = response.json()
+
+    if data.get("IsErroredOnProcessing"):
+        error_msg = data.get("ErrorMessage", ["Unknown OCR error"])
+        raise RuntimeError(
+            error_msg[0] if isinstance(error_msg, list) else str(error_msg)
+        )
+
+    parsed_results = data.get("ParsedResults") or []
+    if not parsed_results:
+        return "*No text was detected in this image.*"
+
+    text = parsed_results[0].get("ParsedText", "").strip()
+    return text if text else "*No text was detected in this image.*"
 
 
 @app.post("/convert")
@@ -46,8 +99,17 @@ async def convert_file(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        result = md.convert(tmp_path)
-        return {"filename": file.filename, "markdown": result.text_content}
+        if ext in IMAGE_EXT:
+            extracted = _ocr_image(tmp_path)
+            markdown_output = (
+                f"# OCR Result: {file.filename}\n\n"
+                f"*Text extracted with OCR.space*\n\n---\n\n{extracted}"
+            )
+        else:
+            result = md.convert(tmp_path)
+            markdown_output = result.text_content
+
+        return {"filename": file.filename, "markdown": markdown_output}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -222,3 +284,11 @@ async def convert_url(request: UrlRequest):
             f"Primary method error: {primary_error} | Fallback (yt-dlp) error: {fallback_error}"
         )
         raise HTTPException(status_code=429, detail=detail)
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "awake",
+        "message": "Server is ready"
+    }

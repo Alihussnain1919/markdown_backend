@@ -5,3 +5,5 @@ requests
 yt-dlp
 youtube-transcript-api
 markitdown[all]
+pydantic
+python-dotenv
