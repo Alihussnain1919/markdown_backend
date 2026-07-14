@@ -401,14 +401,33 @@ async def convert_file(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+MAX_BATCH_FILES = 4
+MAX_BATCH_SIZE_BYTES = 40 * 1024 * 1024  # 40 MB
+
 @app.post("/convert-batch")
 async def convert_batch(request: Request, files: List[UploadFile] = File(...), as_zip: bool = False):
     """Convert multiple files in one request. Each file succeeds or fails
     independently -- one bad file in the batch won't sink the rest."""
     _enforce_rate_limit(request)
 
-    if len(files) > 20:
-        raise HTTPException(status_code=400, detail="Batch limit is 20 files at a time.")
+    # 1. Reject if more than 4 files are submitted
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Batch limit is {MAX_BATCH_FILES} files at a time."
+        )
+
+    # 2. Reject if the total combined file size is over 40MB
+    total_batch_size = 0
+    for f in files:
+        if f.size:
+            total_batch_size += f.size
+
+    if total_batch_size > MAX_BATCH_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400, 
+            detail="The combined size of your files exceeds the 40 MB batch limit."
+        )
 
     results = []
     for f in files:
